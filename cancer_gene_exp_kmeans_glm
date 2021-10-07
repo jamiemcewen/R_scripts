@@ -1,0 +1,127 @@
+library(tidyverse)
+library(ggplot2)
+library(factoextra)
+library(cluster)
+library(MASS)
+
+#_______________Imported Data and Cleanup_______________#
+#Read data, transpose so patients are rows and genes are columns
+ge_read <- read.csv("Colorectal Cancer Gene Expression Data.csv")
+ge_read <- column_to_rownames(ge_read, var = "ID_REF")
+gene_expression <- data.frame(t(ge_read))
+
+#convert all data to numeric
+gene_expression[] <- lapply(gene_expression, as.numeric) 
+
+#Import patient dataset
+patient_data <- read_csv("Colorectal Cancer Patient Data.csv")
+patient_data <- patient_data[-63,] #remove empty last row
+
+
+
+#_______________Cluster Analysis of Gene Expression Data_______________#
+
+#1. Estimate number of clusters
+#2. Assign gene expression clusters to each patient (i.e. predominant gene expression pattern)
+#3. Append to patient data file for further analysis
+
+#Cluster dendogram to estimate the number of distinct gene expression clusters
+plot(hclust(dist(gene_expression)),cex = 0.6, main="Cluster Dendrogram Based on Gene Expression", xlab="Patient ID")
+
+#"Eyeball method" looks to be possibly 4 major clusters, confirm with the "elbow method"
+fviz_nbclust(gene_expression, kmeans, method = "wss") 
+
+#Elbow method is unclear, no strong support for any particular K. So let's try the "silhouette method"
+fviz_nbclust(gene_expression, kmeans, method = "silhouette")
+
+#Silhouette Method suggests K = 2. We can use the gap statistic for further confirmation:
+gap_check <- fviz_nbclust(gene_expression, kmeans, method = "gap_stat") 
+gap_check 
+
+#Gap method further suggests a group of 2 (but 4 or 7 are possible). 
+#We'll move ahead and test K = 2, 4 and 7 with kmeansAIC function from Sherry Towers - see http://sherrytowers.com/2013/10/24/k-means-clustering/ 
+
+#Setup the function:
+kmeansAIC = function(fit){
+  
+  m = ncol(fit$centers)
+  n = length(fit$cluster)
+  k = nrow(fit$centers)
+  D = fit$tot.withinss
+  return(D + 2*m*k)
+}
+
+#Assess models at K=2, 4 or 7 witwith kmeansAIC:
+kmtest2 <- kmeans(gene_expression, centers = 2, nstart = 25)
+kmeansAIC(kmtest2)
+
+kmtest4 <- kmeans(gene_expression, centers = 4, nstart = 25)
+kmeansAIC(kmtest4)
+
+kmtest7 <- kmeans(gene_expression, centers = 2, nstart = 25)
+kmeansAIC(kmtest7)
+
+#The lowest AIC is K = 2, so we'll move ahead with the assumtion of two clusters.
+#But first, a little cleanup:
+rm(kmtest2)
+rm(kmtest4)
+rm(kmtest7)
+
+#Now we can build the final kmeans model
+km <- kmeans(gene_expression, centers = 2, nstart = 25)
+fviz_cluster(km, data = gene_expression, labelsize=9, main="Patient Gene Expression Cluster Assignment")
+
+
+
+#_______________Data Manipulation: extract cluster info, append to patient data and clean up_______________#
+
+
+#Next we'll append the cluster assignment data to the patient file
+
+#Read patient k-means cluster assignment to a data frame
+gene_cluster <- data.frame(km$cluster) 
+
+#Make patient ID a usable column, match the column name "ID_REF" in patient data
+gene_cluster <- tibble::rownames_to_column(gene_cluster, "ID_REF") 
+
+#Join the patient cluster number to the patient data via lookup with patient ID
+patient_data_gene <- left_join(patient_data,gene_cluster) 
+
+#Cleaunup column names
+names(patient_data_gene) <- gsub("\\s+", "_", names(patient_data_gene))
+names(patient_data_gene) <- gsub("\\(", "", names(patient_data_gene))
+names(patient_data_gene) <- gsub("\\)", "", names(patient_data_gene))
+
+
+
+
+#_______________GLM for gene expression cluster relationship to disease progression_______________#
+
+#Disease progression/severity appears to be related to gene cluster expression 
+table(patient_data_gene$km.cluster,patient_data_gene$Dukes_Stage)
+
+#We'll use an ordinal regression model to test if gene expression cluster is related to disease progression
+duke_stage_glm <- polr(factor(Dukes_Stage) ~ km.cluster, data=patient_data_gene, Hess = TRUE)
+summary(duke_stage_glm)
+
+#t-value seems to suggest an effect
+#We can generate a p-value assuming a normal dist, which may not apply with a somewhat small sample size here (63)
+pnorm(abs(-2.249), lower.tail = FALSE) * 2
+
+#Patients with cluster 1 gene expression tend to have more advanced Duke's Stage
+#Odds ratio to tell how much more likely disease progression is with a given gene expression cluster
+1/exp(coef(duke_stage_glm))
+
+#patients with gene expression profiles matching cluster 1 are 2.96 time more likely to have later stage (C and D) cancers.
+#possibility for early detection of disease progression with these gene expression profiles
+
+
+
+
+#_______________Interesting Outlier Gene Expression Patterns in Patients_______________#
+
+#A few patients had outlier levels of gene expression. We can use a distance matrix based visualization to confirm:
+distance <- get_dist(gene_expression)
+fviz_dist(distance, lab_size = 7, gradient = list(low = "#00AFBB", mid = "white", high = "#FC4E07"))
+
+#Patients 147, 144 and 186 all had differentiated gene expression patterns - possibility for future case studies
